@@ -10,6 +10,12 @@ const API_KEY = process.env.API_KEY || "change-moi-api";
 const ADMIN_KEY = process.env.ADMIN_KEY || "change-moi-admin";
 const MAX_DIST = Number(process.env.MAX_DIST || 40);  // portée max de la voix (studs)
 const FULL_DIST = Number(process.env.FULL_DIST || 8); // distance à laquelle le volume est encore à 100 %
+// Portées selon le mode de voix : [distance à 100 %, portée maximale] en studs
+const RANGES = {
+  whisper: [Number(process.env.WHISPER_FULL || 2), Number(process.env.WHISPER_MAX || 10)],
+  normal: [FULL_DIST, MAX_DIST],
+  shout: [Number(process.env.SHOUT_FULL || 15), Number(process.env.SHOUT_MAX || 90)],
+};
 
 const world = new Map();   // userId -> { name, x, y, z, t }
 const codes = new Map();   // code -> { userId, name }
@@ -59,7 +65,7 @@ const server = http.createServer(async (req, res) => {
       for (const p of list) {
         present.add(p.userId);
         if (p.ptt) pttDown.add(p.userId); else pttDown.delete(p.userId);
-        world.set(p.userId, { name: p.name, x: p.x ?? null, y: p.y ?? null, z: p.z ?? null, t: now });
+        world.set(p.userId, { name: p.name, x: p.x ?? null, y: p.y ?? null, z: p.z ?? null, t: now, mode: RANGES[p.mode] ? p.mode : "normal" });
       }
       for (const id of [...world.keys()]) if (!present.has(id)) world.delete(id);
       for (const [c, v] of codes) if (!present.has(v.userId)) codes.delete(c);
@@ -67,10 +73,16 @@ const server = http.createServer(async (req, res) => {
       for (const id of [...pttDown]) if (!present.has(id)) pttDown.delete(id);
       // On renvoie à Roblox qui est connecté au vocal et qui est en train de parler
       const t = Date.now();
-      const speaking = [...clients.values()]
-        .filter((c) => t - c.lastVoice < 400 && !muted.has(c.userId))
-        .map((c) => c.userId);
-      return send(res, 200, { ok: true, connected: [...clients.keys()], speaking });
+      const speaking = [];
+      const levels = {}; // volume de chaque joueur qui parle, de 0 à 1
+      for (const c of clients.values()) {
+        if (t - c.lastVoice < 400 && !muted.has(c.userId)) {
+          speaking.push(c.userId);
+          levels[c.userId] = Number(c.peak.toFixed(2));
+        }
+        c.peak *= 0.4;
+      }
+      return send(res, 200, { ok: true, connected: [...clients.keys()], speaking, levels });
     }
 
     if (url.pathname === "/roblox/ptt") { // changement immédiat de la touche pour parler
@@ -109,16 +121,26 @@ const server = http.createServer(async (req, res) => {
 // --- Voix : WebSocket ---
 const wss = new WebSocketServer({ server, path: "/ws", maxPayload: 16384 });
 
+// Volume d'un morceau d'audio, de 0 (silence) à 1 (très fort)
+function levelOf(buf) {
+  const n = buf.length >> 1;
+  if (!n) return 0;
+  let sum = 0;
+  for (let i = 0; i < n; i++) { const v = buf.readInt16LE(i * 2) / 32768; sum += v * v; }
+  return Math.min(1, Math.pow(Math.sqrt(sum / n) / 0.12, 0.7));
+}
+
 function relay(sender, pcm) {
   const me = world.get(sender.userId);
   if (!me || me.x === null || Date.now() - me.t > 5000) return;
+  const [full, max] = RANGES[me.mode] || RANGES.normal; // portée selon le mode de voix de celui qui parle
   for (const c of clients.values()) {
     if (c === sender || c.ws.readyState !== 1) continue;
     const o = world.get(c.userId);
     if (!o || o.x === null) continue;
     const d = Math.hypot(me.x - o.x, me.y - o.y, me.z - o.z);
-    if (d >= MAX_DIST) continue;
-    const g = d <= FULL_DIST ? 1 : 1 - (d - FULL_DIST) / (MAX_DIST - FULL_DIST);
+    if (d >= max) continue;
+    const g = d <= full ? 1 : 1 - (d - full) / (max - full);
     const head = Buffer.alloc(3);
     head.writeUInt16LE(sender.id, 0);
     head.writeUInt8(Math.round(g * g * 255), 2);
@@ -136,7 +158,7 @@ wss.on("connection", (ws) => {
         if (!link) { ws.send(JSON.stringify({ type: "error", message: "Code invalide. Regarde le code affiché en jeu." })); return; }
         const old = clients.get(link.userId);
         if (old) old.ws.close(4002, "Connecté ailleurs");
-        me = { ws, id: nextId++ % 65535, userId: link.userId, name: link.name, pttMode: false, lastVoice: 0 };
+        me = { ws, id: nextId++ % 65535, userId: link.userId, name: link.name, pttMode: false, lastVoice: 0, peak: 0 };
         clients.set(link.userId, me);
         ws.send(JSON.stringify({ type: "joined", name: link.name }));
       }
@@ -146,6 +168,7 @@ wss.on("connection", (ws) => {
     if (!me || muted.has(me.userId) || data.length === 0 || data.length > 8192) return;
     if (me.pttMode && !pttDown.has(me.userId)) return; // mode "appuyer pour parler" : touche N non enfoncée
     me.lastVoice = Date.now();
+    me.peak = Math.max(me.peak, levelOf(data));
     relay(me, data);
   });
   ws.on("close", () => { if (me && clients.get(me.userId) === me) clients.delete(me.userId); });
