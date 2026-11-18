@@ -1,0 +1,8 @@
+{
+  "name": "voice-rp",
+  "version": "1.0.0",
+  "description": "Chat vocal de proximité externe pour serveur RP Roblox",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "ws": "^8.18.0" }
+}

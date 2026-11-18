@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Modération vocale</title>
+<style>
+  body{font:16px/1.5 system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem;background:#14161a;color:#e8eaed}
+  h1{font-size:1.4rem;margin-bottom:1rem}
+  .row{display:flex;align-items:center;gap:.5rem;padding:.6rem 0;border-bottom:1px solid #2a2e35}
+  .row b{flex:1}
+  button{font:inherit;padding:.3rem .8rem;border:1px solid #444b55;background:#1d2127;color:inherit;border-radius:6px;cursor:pointer}
+  button:hover{background:#2a2f37}
+  .muted{color:#e5a14a}
+  p{color:#9aa3ad}
+</style></head><body>
+<h1>Joueurs connectés au vocal</h1>
+<div id="list"><p>Chargement…</p></div>
+<script>
+const key = new URLSearchParams(location.search).get("key");
+async function act(action, userId){
+  await fetch("/admin/act?key="+encodeURIComponent(key),{method:"POST",body:JSON.stringify({action,userId})});
+  load();
+}
+async function load(){
+  const r = await fetch("/admin/list?key="+encodeURIComponent(key));
+  const l = await r.json();
+  const el = document.getElementById("list");
+  if(!l.length){ el.innerHTML="<p>Personne n'est connecté.</p>"; return; }
+  el.innerHTML = l.map(p=>`<div class="row"><b>${p.name.replace(/[<>&]/g,"")} ${p.muted?'<span class="muted">(muet)</span>':''}</b>
+    <button onclick="act('${p.muted?'unmute':'mute'}',${p.userId})">${p.muted?'Rendre la parole':'Rendre muet'}</button>
+    <button onclick="act('kick',${p.userId})">Expulser</button></div>`).join("");
+}
+load(); setInterval(load,3000);
+</script></body></html>

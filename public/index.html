@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vocal RP</title>
+<style>
+  :root{--bg:#101418;--panel:#181e25;--line:#2b343e;--text:#e9edf1;--dim:#93a0ad;--ok:#5dd39e;--warn:#f0b35a}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,sans-serif}
+  main{width:min(420px,92vw);background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:1.5rem}
+  h1{margin:0 0 .25rem;font-size:1.35rem}
+  p{margin:.25rem 0 1rem;color:var(--dim)}
+  input[type=text]{width:100%;font:600 1.6rem/1 ui-monospace,monospace;letter-spacing:.3em;text-align:center;padding:.7rem;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)}
+  button{width:100%;margin-top:.8rem;font:inherit;font-weight:600;padding:.7rem;border:0;border-radius:8px;background:var(--ok);color:#06231a;cursor:pointer}
+  button.off{background:var(--warn);color:#2d1c00}
+  .opt{display:flex;justify-content:space-between;align-items:center;margin-top:1rem;color:var(--dim)}
+  #status{margin-top:1rem;min-height:1.5em}
+  #meter{height:8px;border-radius:4px;background:var(--bg);margin-top:.6rem;overflow:hidden}
+  #bar{height:100%;width:0;background:var(--ok);transition:width .08s}
+  #live{display:none}
+</style></head><body>
+<main>
+  <h1>Vocal RP</h1>
+  <p>Entre le code affiché en jeu (en bas à gauche), puis clique sur Se connecter. Tu entends les joueurs selon leur distance.</p>
+  <div id="connect">
+    <input id="code" type="text" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="off">
+    <button id="go">Se connecter</button>
+  </div>
+  <div id="live">
+    <div id="meter"><div id="bar"></div></div>
+    <div class="opt"><span>Volume général</span><input id="vol" type="range" min="0" max="2" step="0.05" value="1"></div>
+    <div class="opt"><label><input id="ptt" type="checkbox"> Appuyer pour parler (touche V)</label></div>
+    <button id="mic">Couper mon micro</button>
+    <button id="leave" class="off">Se déconnecter</button>
+  </div>
+  <div id="status"></div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const RATE = 16000;
+let ws, ctx, stream, proc, master, pttDown = false, micOff = false, hang = 0;
+const speakers = new Map();
+
+const setStatus = (t) => ($("status").textContent = t);
+
+async function start() {
+  const code = $("code").value.trim();
+  if (!/^\d{6}$/.test(code)) return setStatus("Le code contient 6 chiffres.");
+  try {
+    ctx = new AudioContext();
+    await ctx.resume();
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch (e) {
+    return setStatus("Micro refusé. Autorise-le dans ton navigateur puis réessaie.");
+  }
+  master = ctx.createGain();
+  master.gain.value = Number($("vol").value);
+  master.connect(ctx.destination);
+
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => ws.send(JSON.stringify({ type: "join", code }));
+  ws.onmessage = (e) => {
+    if (typeof e.data === "string") {
+      const m = JSON.parse(e.data);
+      if (m.type === "joined") { setStatus("Connecté : " + m.name); $("connect").style.display = "none"; $("live").style.display = "block"; startMic(); }
+      if (m.type === "error") { setStatus(m.message); stop(); }
+    } else play(e.data);
+  };
+  ws.onclose = (e) => { if (ctx) { setStatus(e.reason || "Déconnecté."); stop(); } };
+}
+
+function startMic() {
+  const src = ctx.createMediaStreamSource(stream);
+  proc = ctx.createScriptProcessor(1024, 1, 1);
+  src.connect(proc);
+  proc.connect(ctx.destination); // sortie silencieuse, nécessaire pour que le traitement tourne
+  const ratio = ctx.sampleRate / RATE;
+  proc.onaudioprocess = (e) => {
+    const input = e.inputBuffer.getChannelData(0);
+    let sum = 0;
+    for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+    const rms = Math.sqrt(sum / input.length);
+    $("bar").style.width = Math.min(100, rms * 600) + "%";
+
+    const ptt = $("ptt").checked;
+    let talking = ptt ? pttDown : rms > 0.012;
+    const now = performance.now();
+    if (talking) hang = now + 300;
+    if (micOff || (!talking && now > hang) || ws.readyState !== 1 || ws.bufferedAmount > 50000) return;
+
+    const n = Math.floor(input.length / ratio);
+    const out = new Int16Array(n);
+    for (let i = 0; i < n; i++) {
+      const a = Math.floor(i * ratio), b = Math.max(a + 1, Math.floor((i + 1) * ratio));
+      let s = 0; for (let j = a; j < b; j++) s += input[j];
+      out[i] = Math.max(-1, Math.min(1, s / (b - a))) * 32767;
+    }
+    ws.send(out.buffer);
+  };
+}
+
+function play(data) {
+  const id = new DataView(data).getUint16(0, true);
+  const gain = new DataView(data).getUint8(2) / 255;
+  const pcm = new Int16Array(data.slice(3));
+  const buf = ctx.createBuffer(1, pcm.length, RATE);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+  const s = speakers.get(id) || { t: 0 };
+  const now = ctx.currentTime;
+  if (s.t < now + 0.02 || s.t > now + 0.6) s.t = now + 0.08;
+  const src = ctx.createBufferSource();
+  const g = ctx.createGain();
+  g.gain.value = gain;
+  src.buffer = buf;
+  src.connect(g); g.connect(master);
+  src.start(s.t);
+  s.t += buf.duration;
+  speakers.set(id, s);
+}
+
+function stop() {
+  try { proc && proc.disconnect(); } catch {}
+  stream && stream.getTracks().forEach((t) => t.stop());
+  try { ws && ws.close(); } catch {}
+  try { ctx && ctx.close(); } catch {}
+  ctx = ws = stream = proc = null;
+  $("connect").style.display = "block"; $("live").style.display = "none";
+}
+
+$("go").onclick = start;
+$("code").onkeydown = (e) => { if (e.key === "Enter") start(); };
+$("leave").onclick = () => { stop(); setStatus("Déconnecté."); };
+$("vol").oninput = (e) => { if (master) master.gain.value = Number(e.target.value); };
+$("mic").onclick = () => { micOff = !micOff; $("mic").textContent = micOff ? "Réactiver mon micro" : "Couper mon micro"; $("mic").className = micOff ? "off" : ""; };
+addEventListener("keydown", (e) => { if (e.key.toLowerCase() === "v") pttDown = true; });
+addEventListener("keyup", (e) => { if (e.key.toLowerCase() === "v") pttDown = false; });
+</script></body></html>
