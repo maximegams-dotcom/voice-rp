@@ -27,7 +27,7 @@
   <div id="live">
     <div id="meter"><div id="bar"></div></div>
     <div class="opt"><span>Volume général</span><input id="vol" type="range" min="0" max="2" step="0.05" value="1"></div>
-    <div class="opt"><label><input id="ptt" type="checkbox"> Appuyer pour parler (touche V)</label></div>
+    <div class="opt"><label><input id="ptt" type="checkbox"> Appuyer pour parler (touche N en jeu)</label></div>
     <button id="mic">Couper mon micro</button>
     <button id="leave" class="off">Se déconnecter</button>
   </div>
@@ -36,10 +36,11 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const RATE = 16000;
-let ws, ctx, stream, proc, master, pttDown = false, micOff = false, hang = 0;
+let ws, ctx, stream, proc, master, micOff = false, hang = 0;
 const speakers = new Map();
 
 const setStatus = (t) => ($("status").textContent = t);
+const sendMode = () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "mode", ptt: $("ptt").checked })); };
 
 async function start() {
   const code = $("code").value.trim();
@@ -63,7 +64,7 @@ async function start() {
   ws.onmessage = (e) => {
     if (typeof e.data === "string") {
       const m = JSON.parse(e.data);
-      if (m.type === "joined") { setStatus("Connecté : " + m.name); $("connect").style.display = "none"; $("live").style.display = "block"; startMic(); }
+      if (m.type === "joined") { sendMode(); setStatus("Connecté : " + m.name); $("connect").style.display = "none"; $("live").style.display = "block"; startMic(); }
       if (m.type === "error") { setStatus(m.message); stop(); }
     } else play(e.data);
   };
@@ -84,7 +85,7 @@ function startMic() {
     $("bar").style.width = Math.min(100, rms * 600) + "%";
 
     const ptt = $("ptt").checked;
-    let talking = ptt ? pttDown : rms > 0.012;
+    let talking = ptt ? true : rms > 0.012; // en mode "appuyer pour parler", c'est le serveur qui filtre selon la touche N en jeu
     const now = performance.now();
     if (talking) hang = now + 300;
     if (micOff || (!talking && now > hang) || ws.readyState !== 1 || ws.bufferedAmount > 50000) return;
@@ -134,6 +135,5 @@ $("code").onkeydown = (e) => { if (e.key === "Enter") start(); };
 $("leave").onclick = () => { stop(); setStatus("Déconnecté."); };
 $("vol").oninput = (e) => { if (master) master.gain.value = Number(e.target.value); };
 $("mic").onclick = () => { micOff = !micOff; $("mic").textContent = micOff ? "Réactiver mon micro" : "Couper mon micro"; $("mic").className = micOff ? "off" : ""; };
-addEventListener("keydown", (e) => { if (e.key.toLowerCase() === "v") pttDown = true; });
-addEventListener("keyup", (e) => { if (e.key.toLowerCase() === "v") pttDown = false; });
+$("ptt").onchange = sendMode;
 </script></body></html>

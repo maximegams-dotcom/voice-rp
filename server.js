@@ -15,6 +15,7 @@ const world = new Map();   // userId -> { name, x, y, z, t }
 const codes = new Map();   // code -> { userId, name }
 const clients = new Map(); // userId -> { ws, id, userId, name }
 const muted = new Set();   // userIds rendus muets
+const pttDown = new Set(); // userIds qui maintiennent la touche pour parler (en jeu)
 let nextId = 1;
 
 const readBody = (req) =>
@@ -57,11 +58,23 @@ const server = http.createServer(async (req, res) => {
       const now = Date.now();
       for (const p of list) {
         present.add(p.userId);
+        if (p.ptt) pttDown.add(p.userId); else pttDown.delete(p.userId);
         world.set(p.userId, { name: p.name, x: p.x ?? null, y: p.y ?? null, z: p.z ?? null, t: now });
       }
       for (const id of [...world.keys()]) if (!present.has(id)) world.delete(id);
       for (const [c, v] of codes) if (!present.has(v.userId)) codes.delete(c);
       for (const [id, c] of clients) if (!present.has(id)) { c.ws.close(4000, "Tu as quitté le jeu"); clients.delete(id); }
+      for (const id of [...pttDown]) if (!present.has(id)) pttDown.delete(id);
+      // On renvoie à Roblox qui est connecté au vocal et qui est en train de parler
+      const t = Date.now();
+      const speaking = [...clients.values()]
+        .filter((c) => t - c.lastVoice < 400 && !muted.has(c.userId))
+        .map((c) => c.userId);
+      return send(res, 200, { ok: true, connected: [...clients.keys()], speaking });
+    }
+
+    if (url.pathname === "/roblox/ptt") { // changement immédiat de la touche pour parler
+      body.talking ? pttDown.add(body.userId) : pttDown.delete(body.userId);
       return send(res, 200, { ok: true });
     }
 
@@ -123,13 +136,17 @@ wss.on("connection", (ws) => {
         if (!link) { ws.send(JSON.stringify({ type: "error", message: "Code invalide. Regarde le code affiché en jeu." })); return; }
         const old = clients.get(link.userId);
         if (old) old.ws.close(4002, "Connecté ailleurs");
-        me = { ws, id: nextId++ % 65535, userId: link.userId, name: link.name };
+        me = { ws, id: nextId++ % 65535, userId: link.userId, name: link.name, pttMode: false, lastVoice: 0 };
         clients.set(link.userId, me);
         ws.send(JSON.stringify({ type: "joined", name: link.name }));
       }
+      if (m.type === "mode" && me) me.pttMode = m.ptt === true;
       return;
     }
-    if (me && !muted.has(me.userId) && data.length > 0 && data.length <= 8192) relay(me, data);
+    if (!me || muted.has(me.userId) || data.length === 0 || data.length > 8192) return;
+    if (me.pttMode && !pttDown.has(me.userId)) return; // mode "appuyer pour parler" : touche N non enfoncée
+    me.lastVoice = Date.now();
+    relay(me, data);
   });
   ws.on("close", () => { if (me && clients.get(me.userId) === me) clients.delete(me.userId); });
 });
